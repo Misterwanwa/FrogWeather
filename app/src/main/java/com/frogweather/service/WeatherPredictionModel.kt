@@ -100,9 +100,14 @@ object WeatherPredictionModel {
     private fun mapWarningToWeatherType(event: String): WeatherType {
         val lower = event.lowercase()
         return when {
-            lower.contains("gewitter") || lower.contains("thunderstorm") || lower.contains("sturm") -> WeatherType.THUNDERSTORM
-            lower.contains("schnee") || lower.contains("snow") || lower.contains("frost") || lower.contains("glätte") -> WeatherType.SNOW
-            lower.contains("regen") || lower.contains("rain") || lower.contains("niederschlag") -> WeatherType.RAINY
+            lower.contains("gewitter") || lower.contains("thunderstorm") || lower.contains("sturm") ||
+                lower.contains("tornado") || lower.contains("hurricane") || lower.contains("gale") ||
+                lower.contains("wind") -> WeatherType.THUNDERSTORM
+            lower.contains("schnee") || lower.contains("snow") || lower.contains("frost") ||
+                lower.contains("glätte") || lower.contains("blizzard") || lower.contains("winter") ||
+                lower.contains("freeze") -> WeatherType.SNOW
+            lower.contains("regen") || lower.contains("rain") || lower.contains("niederschlag") ||
+                lower.contains("flood") -> WeatherType.RAINY
             else -> WeatherType.OTHER
         }
     }

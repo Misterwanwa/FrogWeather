@@ -57,7 +57,7 @@ fun WarningBanner(
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
                     Text(
-                        text = "WETTERWARNUNG: ${warning.title}",
+                        text = "${warning.source.badgeText}-WARNUNG: ${warning.title}",
                         color = textColor,
                         fontSize = 13.sp,
                         letterSpacing = 0.5.sp
