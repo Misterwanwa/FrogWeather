@@ -22,12 +22,25 @@ interface WeatherService {
         @Query("units") units: String = "metric"
     ): WeatherResponse
 
-    @GET("onecall")
-    suspend fun oneCall(
+    @GET("forecast")
+    suspend fun forecast(
         @Query("lat") lat: Double,
         @Query("lon") lon: Double,
-        @Query("exclude") exclude: String,
         @Query("appid") apiKey: String,
         @Query("units") units: String = "metric"
-    ): OneCallResponse
+    ): ForecastResponse
+
+    @GET("forecast")
+    suspend fun forecastByCity(
+        @Query("q") city: String,
+        @Query("appid") apiKey: String,
+        @Query("units") units: String = "metric"
+    ): ForecastResponse
+
+    @GET("air_pollution")
+    suspend fun airPollution(
+        @Query("lat") lat: Double,
+        @Query("lon") lon: Double,
+        @Query("appid") apiKey: String
+    ): AirPollutionResponse
 }

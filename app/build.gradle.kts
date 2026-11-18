@@ -42,6 +42,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.0")
     implementation("androidx.compose.ui:ui:1.5.0")
     implementation("androidx.compose.material:material:1.5.0")
+    implementation("androidx.compose.material:material-icons-extended:1.5.0")
     implementation("androidx.compose.ui:ui-tooling-preview:1.5.0")
     debugImplementation("androidx.compose.ui:ui-tooling:1.5.0")
 
@@ -62,4 +63,14 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
     // image loading (for future icons/backgrounds)
     implementation("io.coil-kt:coil-compose:2.3.0")
+
+    // video playback
+    implementation("androidx.media3:media3-exoplayer:1.3.1")
+    implementation("androidx.media3:media3-ui:1.3.1")
+    
+    // OpenStreetMap (osmdroid) for weather map
+    implementation("org.osmdroid:osmdroid-android:6.1.17")
+
+    // Unit Testing
+    testImplementation("junit:junit:4.13.2")
 }
