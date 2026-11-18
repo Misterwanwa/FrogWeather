@@ -4,12 +4,14 @@ import com.frogweather.service.DwdWarningFetcher
 import com.frogweather.service.WarningLatLon
 import com.frogweather.service.WarningSeverity
 import com.frogweather.service.WarningSource
+import com.frogweather.ui.createLocalBoundingBox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.cos
 
 class WarningMapParserTest {
 
@@ -195,5 +197,22 @@ class WarningMapParserTest {
         assertEquals(listOf("https://api.weather.gov/zones/county/CAC085"), alert.affectedZones)
         assertNotNull(alert.warning.onsetInstant)
         assertNotNull(alert.warning.expiresInstant)
+    }
+
+    @Test
+    fun createLocalBoundingBox_spansFifteenKilometersInGermanyAndUs() {
+        val berlinBox = createLocalBoundingBox(52.52, 13.405, 15.0)
+        val berlinNsKm = (berlinBox.latNorth - berlinBox.latSouth) * 111.32
+        val berlinEwKm = (berlinBox.lonEast - berlinBox.lonWest) * 111.32 * cos(Math.toRadians(52.52))
+        assertEquals(15.0, berlinNsKm, 0.1)
+        assertEquals(15.0, berlinEwKm, 0.1)
+        assertEquals(52.52, (berlinBox.latNorth + berlinBox.latSouth) / 2.0, 0.0001)
+        assertEquals(13.405, (berlinBox.lonEast + berlinBox.lonWest) / 2.0, 0.0001)
+
+        val sfBox = createLocalBoundingBox(37.7749, -122.4194, 15.0)
+        val sfNsKm = (sfBox.latNorth - sfBox.latSouth) * 111.32
+        val sfEwKm = (sfBox.lonEast - sfBox.lonWest) * 111.32 * cos(Math.toRadians(37.7749))
+        assertEquals(15.0, sfNsKm, 0.1)
+        assertEquals(15.0, sfEwKm, 0.1)
     }
 }

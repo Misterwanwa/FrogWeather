@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.*
@@ -53,6 +54,7 @@ import org.osmdroid.events.ZoomEvent
 import org.osmdroid.tileprovider.MapTileProviderBasic
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
 import org.osmdroid.tileprovider.tilesource.XYTileSource
+import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.MapView
@@ -63,6 +65,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.cos
 
 // Available weather map layers from OpenWeatherMap (fast _new tile endpoints)
 enum class WeatherMapLayer(
@@ -81,6 +84,24 @@ enum class WeatherMapLayer(
 }
 
 private const val WARNING_POLL_INTERVAL_MS = 10_000L
+private const val OVERVIEW_ZOOM = 6.2
+private const val LOCAL_DIAMETER_KM = 15.0
+
+internal fun createLocalBoundingBox(
+    lat: Double,
+    lon: Double,
+    diameterKm: Double = LOCAL_DIAMETER_KM
+): BoundingBox {
+    val radiusKm = diameterKm / 2.0
+    val deltaLat = radiusKm / 111.32
+    val cosLat = cos(Math.toRadians(lat)).coerceAtLeast(0.01)
+    val deltaLon = radiusKm / (111.32 * cosLat)
+    val north = (lat + deltaLat).coerceIn(-85.0, 85.0)
+    val south = (lat - deltaLat).coerceIn(-85.0, 85.0)
+    val east = (lon + deltaLon).coerceIn(-180.0, 180.0)
+    val west = (lon - deltaLon).coerceIn(-180.0, 180.0)
+    return BoundingBox(north, east, south, west)
+}
 
 @Volatile
 private var isOsmdroidConfigured = false
@@ -134,6 +155,7 @@ private class MapOverlayController(val mapView: MapView) {
     var warningOverlays: MutableList<Polygon> = mutableListOf()
     var lastWarningsSignature: String? = null
     var lastFocusToken: Int = 0
+    var lastLocalizeToken: Int = 0
 }
 
 @Composable
@@ -156,6 +178,9 @@ fun WeatherMapTile(
     var refreshTick by remember { mutableIntStateOf(0) }
     var focusTarget by remember { mutableStateOf<GeoPoint?>(null) }
     var focusToken by remember { mutableIntStateOf(0) }
+    var isLocalizedView by remember { mutableStateOf(false) }
+    var localizeToLocalMode by remember { mutableStateOf(true) }
+    var localizeToken by remember { mutableIntStateOf(0) }
 
     // Sync map polling center when user picks a new city / GPS location
     LaunchedEffect(latitude, longitude) {
@@ -163,6 +188,7 @@ fun WeatherMapTile(
         mapCenterLon = longitude
         selectedWarning = null
         focusTarget = null
+        isLocalizedView = false
     }
 
     val isUs = DwdWarningFetcher.isUsRegion(mapCenterLat, mapCenterLon)
@@ -323,10 +349,15 @@ fun WeatherMapTile(
                 selectedWarningId = selectedWarning?.id,
                 focusTarget = focusTarget,
                 focusToken = focusToken,
+                localizeToLocalMode = localizeToLocalMode,
+                localizeToken = localizeToken,
                 onMapCenterChanged = { newLat, newLon ->
                     if (abs(newLat - mapCenterLat) > 0.5 || abs(newLon - mapCenterLon) > 0.5) {
                         mapCenterLat = newLat
                         mapCenterLon = newLon
+                    }
+                    if (isLocalizedView && (abs(newLat - latitude) > 0.05 || abs(newLon - longitude) > 0.05)) {
+                        isLocalizedView = false
                     }
                 },
                 onWarningClicked = { warning ->
@@ -340,6 +371,40 @@ fun WeatherMapTile(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
+                )
+            }
+
+            // Localize button: switches between Germany/overview map and ~15 km local view
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(10.dp)
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (isLocalizedView) Color(0xFF4FC3F7)
+                        else Color(0xFF1C2733).copy(alpha = 0.9f)
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (isLocalizedView) Color.White.copy(alpha = 0.9f) else Color(0xFF4FC3F7).copy(alpha = 0.7f),
+                        shape = CircleShape
+                    )
+                    .clickable {
+                        val shouldZoomLocal = !isLocalizedView
+                        isLocalizedView = shouldZoomLocal
+                        localizeToLocalMode = shouldZoomLocal
+                        mapCenterLat = latitude
+                        mapCenterLon = longitude
+                        localizeToken++
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MyLocation,
+                    contentDescription = if (isLocalizedView) "Zur Übersichtskarte" else "Auf 15-km-Umkreis lokalisieren",
+                    tint = if (isLocalizedView) Color(0xFF0E1A24) else Color(0xFF4FC3F7),
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
@@ -604,6 +669,8 @@ private fun WeatherMap(
     selectedWarningId: String?,
     focusTarget: GeoPoint?,
     focusToken: Int,
+    localizeToLocalMode: Boolean,
+    localizeToken: Int,
     onMapCenterChanged: (Double, Double) -> Unit,
     onWarningClicked: (WeatherWarning) -> Unit
 ) {
@@ -622,7 +689,7 @@ private fun WeatherMap(
             isVerticalMapRepetitionEnabled = false
             minZoomLevel = 3.0
             maxZoomLevel = 16.0
-            controller.setZoom(7.5)
+            controller.setZoom(OVERVIEW_ZOOM)
             controller.setCenter(GeoPoint(latitude, longitude))
 
             setOnTouchListener { v, event ->
@@ -684,9 +751,28 @@ private fun WeatherMap(
             var needsInvalidate = false
 
             if (controller.lastCenteredLat != latitude || controller.lastCenteredLon != longitude) {
+                val isCitySwitch = controller.lastCenteredLat != null
                 view.controller.setCenter(GeoPoint(latitude, longitude))
+                if (isCitySwitch) {
+                    view.controller.setZoom(OVERVIEW_ZOOM)
+                }
                 controller.lastCenteredLat = latitude
                 controller.lastCenteredLon = longitude
+                needsInvalidate = true
+            }
+
+            if (controller.lastLocalizeToken != localizeToken) {
+                controller.lastLocalizeToken = localizeToken
+                if (localizeToLocalMode) {
+                    val localBox = createLocalBoundingBox(latitude, longitude, LOCAL_DIAMETER_KM)
+                    if (view.width > 0 && view.height > 0) {
+                        view.zoomToBoundingBox(localBox, true)
+                    } else {
+                        view.post { view.zoomToBoundingBox(localBox, true) }
+                    }
+                } else {
+                    view.controller.animateTo(GeoPoint(latitude, longitude), OVERVIEW_ZOOM, 600L)
+                }
                 needsInvalidate = true
             }
 
