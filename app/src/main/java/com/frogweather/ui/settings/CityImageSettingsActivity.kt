@@ -1,17 +1,16 @@
 package com.frogweather.ui.settings
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import android.Manifest
-import android.os.Build
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,8 +24,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.*
@@ -36,22 +36,30 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.lifecycleScope
+import com.frogweather.data.AppPrefsKeys
+import com.frogweather.data.AppThemeId
 import com.frogweather.data.CityConfig
+import com.frogweather.data.CityImagePromptGenerator
 import com.frogweather.data.CityImageRepository
+import com.frogweather.data.SharedPreferencesKeyValueStore
+import com.frogweather.data.ThemeRepository
 import com.frogweather.data.WeatherScenario
 import com.frogweather.network.PhotonClient
 import com.frogweather.network.PhotonFeature
+import com.frogweather.ui.PromptGeneratorDialog
+import com.frogweather.ui.theme.FrogTheme
 import com.frogweather.ui.theme.FrogWeatherTheme
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileOutputStream
 
 class CityImageSettingsActivity : ComponentActivity() {
-    
+
+    private val _selectedTheme = mutableStateOf(AppThemeId.AERO_CLASSIC)
+    private lateinit var themeRepository: ThemeRepository
+
     companion object {
         private const val PREFS_NAME = "city_settings_prefs"
         private const val KEY_LAST_CITY_ID = "last_city_id"
@@ -59,7 +67,7 @@ class CityImageSettingsActivity : ComponentActivity() {
         private const val KEY_LAST_CITY_COUNTRY = "last_city_country"
         private const val KEY_LAST_LAT = "last_lat"
         private const val KEY_LAST_LON = "last_lon"
-        
+
         fun saveLastCity(context: Context, city: CityConfig) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().apply {
                 putString(KEY_LAST_CITY_ID, city.id)
@@ -70,7 +78,7 @@ class CityImageSettingsActivity : ComponentActivity() {
                 apply()
             }
         }
-        
+
         fun loadLastCity(context: Context): CityConfig? {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val id = prefs.getString(KEY_LAST_CITY_ID, null) ?: return null
@@ -78,9 +86,9 @@ class CityImageSettingsActivity : ComponentActivity() {
             val country = prefs.getString(KEY_LAST_CITY_COUNTRY, null)
             val lat = prefs.getFloat(KEY_LAST_LAT, 0f)
             val lon = prefs.getFloat(KEY_LAST_LON, 0f)
-            
+
             if (lat == 0f && lon == 0f) return null
-            
+
             return CityConfig(
                 id = id,
                 name = name,
@@ -90,22 +98,33 @@ class CityImageSettingsActivity : ComponentActivity() {
             )
         }
     }
-    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Check if we should highlight a specific scenario
+        themeRepository = ThemeRepository(
+            SharedPreferencesKeyValueStore.forPrefs(this, AppPrefsKeys.PREFS_THEME)
+        )
+        _selectedTheme.value = themeRepository.getSelectedTheme()
+
         val highlightScenario = intent.getStringExtra("highlight_scenario")?.let { key ->
-            WeatherScenario.values().find { it.key == key }
+            WeatherScenario.entries.find { it.key == key }
         }
-        
+
         setContent {
-            FrogWeatherTheme {
+            val activeTheme by _selectedTheme
+            FrogWeatherTheme(themeId = activeTheme) {
                 CityImageSettingsScreen(
                     highlightScenario = highlightScenario,
                     onBack = { finish() }
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::themeRepository.isInitialized) {
+            _selectedTheme.value = themeRepository.getSelectedTheme()
         }
     }
 }
@@ -115,15 +134,15 @@ fun CityImageSettingsScreen(
     highlightScenario: WeatherScenario? = null,
     onBack: () -> Unit
 ) {
+    val palette = FrogTheme.palette
     val context = LocalContext.current
     val repository = remember { CityImageRepository.getInstance(context) }
     val activity = context as? Activity
-    
+
     var selectedCity by remember { mutableStateOf<CityConfig?>(null) }
     var showCitySearch by remember { mutableStateOf(false) }
     var permissionGranted by remember { mutableStateOf(false) }
-    
-    // Permission launcher
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -132,8 +151,7 @@ fun CityImageSettingsScreen(
             Toast.makeText(context, "Berechtigung benötigt um Bilder auszuwählen", Toast.LENGTH_LONG).show()
         }
     }
-    
-    // Request permission on first launch
+
     LaunchedEffect(Unit) {
         val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             Manifest.permission.READ_MEDIA_IMAGES
@@ -142,78 +160,92 @@ fun CityImageSettingsScreen(
         }
         permissionLauncher.launch(permission)
     }
-    
-    // Load city - first try intent extras, then saved city
+
+    // Load or auto-ensure city: first intent extras, then settings prefs, then main app prefs
     LaunchedEffect(Unit) {
         val intent = activity?.intent
+        val hasLatLonExtras = intent?.hasExtra("current_lat") == true && intent.hasExtra("current_lon")
         val lat = intent?.getDoubleExtra("current_lat", 0.0) ?: 0.0
         val lon = intent?.getDoubleExtra("current_lon", 0.0) ?: 0.0
-        
-        // First try to find city by coordinates
-        if (lat != 0.0 && lon != 0.0) {
-            val city = repository.findCityByLocation(lat, lon)
-            if (city != null) {
-                selectedCity = city
-                return@LaunchedEffect
-            }
-        }
-        
-        // Then try to load last used city from preferences
-        val lastCity = CityImageSettingsActivity.loadLastCity(context)
-        if (lastCity != null) {
-            // Check if city already exists in repository
-            val existingCity = repository.findCityByLocation(lastCity.lat, lastCity.lon)
-            if (existingCity != null) {
-                selectedCity = existingCity
+        val intentCityName = intent?.getStringExtra("current_city_name")
+        val intentCityCountry = intent?.getStringExtra("current_city_country")
+
+        if (hasLatLonExtras && !(lat == 0.0 && lon == 0.0)) {
+            val existing = repository.findCityByLocation(lat, lon)
+            val resolved = existing ?: if (!intentCityName.isNullOrBlank()) {
+                repository.ensureCity(intentCityName, intentCityCountry, lat, lon)
             } else {
-                // Create new city entry if not exists
-                val newCity = lastCity.copy(id = "${lastCity.name}_${System.currentTimeMillis()}")
-                repository.saveCity(newCity)
-                selectedCity = newCity
+                val mainPrefs = context.getSharedPreferences(AppPrefsKeys.PREFS_MAIN, Context.MODE_PRIVATE)
+                val fallbackName = mainPrefs.getString(AppPrefsKeys.KEY_LAST_CITY_NAME, null)
+                val fallbackCountry = mainPrefs.getString(AppPrefsKeys.KEY_LAST_CITY_COUNTRY, null)
+                repository.ensureCity(fallbackName ?: "Aktueller Ort", fallbackCountry, lat, lon)
             }
+            CityImageSettingsActivity.saveLastCity(context, resolved)
+            selectedCity = resolved
             return@LaunchedEffect
         }
-        
-        // If no city found, show search
+
+        val lastSettingsCity = CityImageSettingsActivity.loadLastCity(context)
+        if (lastSettingsCity != null) {
+            val ensured = repository.ensureCity(
+                name = lastSettingsCity.name,
+                country = lastSettingsCity.country,
+                lat = lastSettingsCity.lat,
+                lon = lastSettingsCity.lon
+            )
+            CityImageSettingsActivity.saveLastCity(context, ensured)
+            selectedCity = ensured
+            return@LaunchedEffect
+        }
+
+        val mainPrefs = context.getSharedPreferences(AppPrefsKeys.PREFS_MAIN, Context.MODE_PRIVATE)
+        val mainName = mainPrefs.getString(AppPrefsKeys.KEY_LAST_CITY_NAME, null)
+        val mainCountry = mainPrefs.getString(AppPrefsKeys.KEY_LAST_CITY_COUNTRY, null)
+        val mainLat = mainPrefs.getFloat(AppPrefsKeys.KEY_LAST_CITY_LAT, 0f).toDouble()
+        val mainLon = mainPrefs.getFloat(AppPrefsKeys.KEY_LAST_CITY_LON, 0f).toDouble()
+        if (!mainName.isNullOrBlank() && !(mainLat == 0.0 && mainLon == 0.0)) {
+            val ensured = repository.ensureCity(mainName, mainCountry, mainLat, mainLon)
+            CityImageSettingsActivity.saveLastCity(context, ensured)
+            selectedCity = ensured
+            return@LaunchedEffect
+        }
+
         showCitySearch = true
     }
-    
+
     Scaffold(
+        backgroundColor = palette.screenBackground,
         topBar = {
             TopAppBar(
-                title = { Text("Stadt-Bilder verwalten") },
-                backgroundColor = Color(0xFF1C2733),
-                contentColor = Color.White,
+                title = { Text("Stadt-Bilder verwalten", color = palette.textPrimary) },
+                backgroundColor = palette.topBarBackground,
+                contentColor = palette.textPrimary,
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Zurück")
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Zurück",
+                            tint = palette.textPrimary
+                        )
                     }
                 }
             )
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(palette.screenBackground)
+                .padding(padding)
+        ) {
             when {
                 showCitySearch || selectedCity == null -> {
                     CitySearchScreen(
-                        onCitySelected = { city ->
-                            selectedCity = city
+                        onCitySelected = { name, country, lat, lon ->
+                            val ensured = repository.ensureCity(name, country, lat, lon)
+                            selectedCity = ensured
                             showCitySearch = false
-                            // Save as last city
-                            CityImageSettingsActivity.saveLastCity(context, city)
-                        },
-                        onCreateCity = { name, country, lat, lon ->
-                            val newCity = CityConfig(
-                                id = "${name}_${System.currentTimeMillis()}",
-                                name = name,
-                                country = country,
-                                lat = lat,
-                                lon = lon
-                            )
-                            repository.saveCity(newCity)
-                            selectedCity = newCity
-                            showCitySearch = false
-                            CityImageSettingsActivity.saveLastCity(context, newCity)
+                            CityImageSettingsActivity.saveLastCity(context, ensured)
                         }
                     )
                 }
@@ -233,15 +265,14 @@ fun CityImageSettingsScreen(
 
 @Composable
 private fun CitySearchScreen(
-    onCitySelected: (CityConfig) -> Unit,
-    onCreateCity: (String, String?, Double, Double) -> Unit
+    onCitySelected: (String, String?, Double, Double) -> Unit
 ) {
+    val palette = FrogTheme.palette
     var query by remember { mutableStateOf("") }
     var suggestions by remember { mutableStateOf<List<PhotonFeature>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -249,16 +280,16 @@ private fun CitySearchScreen(
     ) {
         Text(
             text = "Wähle eine Stadt",
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 20.sp,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+            fontWeight = FontWeight.Bold
         )
-        
+
         Spacer(modifier = Modifier.height(16.dp))
-        
+
         OutlinedTextField(
             value = query,
-            onValueChange = { 
+            onValueChange = {
                 query = it
                 if (it.length >= 2) {
                     scope.launch {
@@ -266,7 +297,7 @@ private fun CitySearchScreen(
                         try {
                             val result = PhotonClient.service.search(it)
                             suggestions = result.features
-                        } catch (e: Exception) {
+                        } catch (_: Exception) {
                             suggestions = emptyList()
                         }
                         isLoading = false
@@ -276,54 +307,52 @@ private fun CitySearchScreen(
                 }
             },
             label = { Text("Stadt suchen...") },
-            leadingIcon = { Icon(Icons.Default.Search, null) },
+            leadingIcon = { Icon(Icons.Default.Search, null, tint = palette.textSecondary) },
             modifier = Modifier.fillMaxWidth(),
             colors = TextFieldDefaults.outlinedTextFieldColors(
-                textColor = Color.White,
-                focusedBorderColor = Color(0xFF4FC3F7),
-                unfocusedBorderColor = Color.White.copy(alpha = 0.5f)
+                textColor = palette.textPrimary,
+                focusedBorderColor = palette.accent,
+                unfocusedBorderColor = palette.dividerColor,
+                focusedLabelColor = palette.accent,
+                unfocusedLabelColor = palette.textSecondary,
+                cursorColor = palette.accent
             )
         )
-        
+
         Spacer(modifier = Modifier.height(16.dp))
-        
+
         LazyColumn {
             items(suggestions) { feature ->
-                val cityName = feature.properties.name ?: "Unbekannt"
+                val cityName = feature.properties.name ?: feature.cityQuery().ifBlank { "Unbekannt" }
                 val country = feature.properties.country
-                val displayName = if (country?.isNotEmpty() == true) "$cityName, $country" else cityName
-                
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .clickable {
-                            val city = CityConfig(
-                                id = "${feature.properties.name}_${System.currentTimeMillis()}",
-                                name = cityName,
-                                country = country,
-                                lat = feature.geometry.coordinates[1],
-                                lon = feature.geometry.coordinates[0]
-                            )
-                            onCitySelected(city)
-                        },
-                    backgroundColor = Color(0xFF2A3A4A)
-                ) {
-                    Text(
-                        text = displayName,
-                        color = Color.White,
-                        modifier = Modifier.padding(16.dp)
-                    )
+                val displayName = if (!country.isNullOrBlank()) "$cityName, $country" else cityName
+                val coords = feature.geometry.coordinates
+                if (coords.size >= 2) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable {
+                                onCitySelected(cityName, country, coords[1], coords[0])
+                            },
+                        backgroundColor = palette.tileSurfaceElevated
+                    ) {
+                        Text(
+                            text = displayName,
+                            color = palette.textPrimary,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
                 }
             }
         }
-        
+
         if (isLoading) {
             Box(
                 modifier = Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(color = Color.White)
+                CircularProgressIndicator(color = palette.accent)
             }
         }
     }
@@ -337,17 +366,23 @@ private fun CityImageManager(
     onCityChange: () -> Unit,
     permissionGranted: Boolean
 ) {
-    var cityConfig by remember { mutableStateOf(city) }
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    
-    // Refresh city config from repository
+    val palette = FrogTheme.palette
+    var cityConfig by remember(city.id) { mutableStateOf(city) }
+    var showPromptDialog by remember { mutableStateOf(false) }
+
     LaunchedEffect(city.id) {
         repository.getAllCities().find { it.id == city.id }?.let {
             cityConfig = it
         }
     }
-    
+
+    val missingScenarios = remember(cityConfig) {
+        repository.getMissingImages(cityConfig.id)
+    }
+    val cityLabel = remember(cityConfig.name, cityConfig.country) {
+        CityImagePromptGenerator.formatCityLabel(cityConfig.name, cityConfig.country)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -358,35 +393,59 @@ private fun CityImageManager(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = cityConfig.name,
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 24.sp,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    fontWeight = FontWeight.Bold
                 )
                 cityConfig.country?.let {
                     Text(
                         text = it,
-                        color = Color.White.copy(alpha = 0.7f),
+                        color = palette.textSecondary,
                         fontSize = 16.sp
                     )
                 }
             }
-            
+
             TextButton(onClick = onCityChange) {
-                Text("Ändern", color = Color(0xFF4FC3F7))
+                Text("Ändern", color = palette.accent)
             }
         }
-        
+
         Spacer(modifier = Modifier.height(8.dp))
-        
+
         Text(
             text = "Lade Bilder für die verschiedenen Wetterszenarien hoch",
-            color = Color.White.copy(alpha = 0.7f),
+            color = palette.textSecondary,
             fontSize = 14.sp
         )
-        
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Unconditionally enabled Prompt Generator button
+        Button(
+            onClick = { showPromptDialog = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                backgroundColor = palette.accent,
+                contentColor = palette.screenBackground
+            )
+        ) {
+            Icon(
+                imageVector = Icons.Default.AutoAwesome,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "KI-Prompts generieren (${missingScenarios.size} fehlend)",
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+
         if (!permissionGranted) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -395,25 +454,25 @@ private fun CityImageManager(
                 fontSize = 12.sp
             )
         }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
+
+        Spacer(modifier = Modifier.height(14.dp))
+
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.weight(1f)
         ) {
-            items(WeatherScenario.values()) { scenario ->
+            items(WeatherScenario.entries) { scenario ->
                 val isHighlighted = scenario == highlightScenario
-                
+
                 ScenarioCard(
                     scenario = scenario,
                     cityId = cityConfig.id,
                     repository = repository,
                     isHighlighted = isHighlighted,
                     onImageUpdated = {
-                        repository.getAllCities().find { it.id == city.id }?.let {
+                        repository.getAllCities().find { it.id == cityConfig.id }?.let {
                             cityConfig = it
                         }
                     },
@@ -421,6 +480,15 @@ private fun CityImageManager(
                 )
             }
         }
+    }
+
+    if (showPromptDialog) {
+        PromptGeneratorDialog(
+            cityLabel = cityLabel,
+            missingScenarios = missingScenarios,
+            highlightedScenario = highlightScenario,
+            onDismiss = { showPromptDialog = false }
+        )
     }
 }
 
@@ -433,27 +501,25 @@ private fun ScenarioCard(
     onImageUpdated: () -> Unit,
     permissionGranted: Boolean
 ) {
+    val palette = FrogTheme.palette
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showImagePicker by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    
-    // Load image from repository
-    var bitmap by remember(cityId, scenario) { 
+
+    var bitmap by remember(cityId, scenario) {
         mutableStateOf(repository.getImage(cityId, scenario))
     }
-    
+
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let { imageUri ->
             scope.launch {
                 try {
-                    // Copy file to app storage
-                    val filename = saveImageToAppStorage(context, imageUri, cityId, scenario)
+                    val filename = repository.saveImage(cityId, scenario, imageUri)
                     if (filename != null) {
                         repository.assignImageToScenario(cityId, scenario, filename)
-                        // Refresh bitmap
                         bitmap = repository.getImage(cityId, scenario)
                         onImageUpdated()
                         Toast.makeText(context, "Bild gespeichert", Toast.LENGTH_SHORT).show()
@@ -466,24 +532,24 @@ private fun ScenarioCard(
             }
         }
     }
-    
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
             .border(
                 width = if (isHighlighted) 4.dp else 0.dp,
-                color = if (isHighlighted) Color(0xFF4FC3F7) else Color.Transparent,
+                color = if (isHighlighted) palette.accent else Color.Transparent,
                 shape = RoundedCornerShape(12.dp)
             )
-            .clickable(enabled = permissionGranted) { 
+            .clickable(enabled = permissionGranted) {
                 if (bitmap != null) {
                     showDeleteConfirm = true
                 } else {
-                    showImagePicker = true 
+                    showImagePicker = true
                 }
             },
-        backgroundColor = Color(0xFF2A3A4A),
+        backgroundColor = palette.tileSurfaceElevated,
         shape = RoundedCornerShape(12.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -494,13 +560,13 @@ private fun ScenarioCard(
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
-                
+
                 IconButton(
                     onClick = { showDeleteConfirm = true },
                     modifier = Modifier.align(Alignment.TopEnd)
                 ) {
                     Icon(
-                        Icons.Default.Delete,
+                        imageVector = Icons.Default.Delete,
                         contentDescription = "Löschen",
                         tint = Color.White
                     )
@@ -518,21 +584,21 @@ private fun ScenarioCard(
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = scenario.displayName,
-                        color = Color.White,
+                        color = palette.textPrimary,
                         fontSize = 14.sp,
                         textAlign = TextAlign.Center
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Icon(
-                        Icons.Default.Add,
+                        imageVector = Icons.Default.Add,
                         contentDescription = "Bild hinzufügen",
-                        tint = if (permissionGranted) Color(0xFF4FC3F7) else Color.Gray
+                        tint = if (permissionGranted) palette.accent else Color.Gray
                     )
                 }
             }
         }
     }
-    
+
     if (showImagePicker) {
         AlertDialog(
             onDismissRequest = { showImagePicker = false },
@@ -555,7 +621,7 @@ private fun ScenarioCard(
             }
         )
     }
-    
+
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
@@ -582,45 +648,4 @@ private fun ScenarioCard(
             }
         )
     }
-}
-
-private suspend fun saveImageToAppStorage(
-    context: Context,
-    uri: Uri,
-    cityId: String,
-    scenario: WeatherScenario
-): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-    try {
-        val inputStream = context.contentResolver.openInputStream(uri) ?: return@withContext null
-        val imagesDir = File(context.filesDir, "city_images").apply { mkdirs() }
-        val filename = "${cityId}_${scenario.key}_${System.currentTimeMillis()}.jpg"
-        val file = File(imagesDir, filename)
-        
-        FileOutputStream(file).use { output ->
-            inputStream.copyTo(output)
-        }
-        inputStream.close()
-        
-        // Compress if needed
-        compressImageIfNeeded(file)
-        
-        filename
-    } catch (e: Exception) {
-        null
-    }
-}
-
-private fun compressImageIfNeeded(file: File) {
-    val maxSize = 1024 * 1024 // 1MB
-    if (file.length() <= maxSize) return
-    
-    val bitmap = android.graphics.BitmapFactory.decodeFile(file.absolutePath) ?: return
-    var quality = 90
-    
-    do {
-        FileOutputStream(file).use { out ->
-            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
-        }
-        quality -= 10
-    } while (file.length() > maxSize && quality > 30)
 }

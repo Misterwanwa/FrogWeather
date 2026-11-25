@@ -70,7 +70,12 @@ data class ForecastItem(
     val weather: List<WeatherCondition>,
     val pop: Double = 0.0,
     val wind: WindInfo? = null,
-    val clouds: CloudsInfo? = null
+    val clouds: CloudsInfo? = null,
+    val rain: ForecastRainInfo? = null
+)
+
+data class ForecastRainInfo(
+    @Json(name = "3h") val threeHour: Double = 0.0
 )
 
 data class ForecastMain(
@@ -119,5 +124,7 @@ data class WeatherDetails(
     val visibilityM: Int?,
     val rainMm: Double?,
     val aqi: Int?,
-    val temperature: Double?
+    val temperature: Double?,
+    val uvIndex: Double? = null,
+    val normalTempC: Double? = null
 )

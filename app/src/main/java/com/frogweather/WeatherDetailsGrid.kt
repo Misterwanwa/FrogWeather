@@ -2,6 +2,7 @@ package com.frogweather
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Text
@@ -16,42 +17,58 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.frogweather.analysis.SportAdvisor
+import com.frogweather.analysis.UvLevel
 import com.frogweather.network.WeatherDetails
+import com.frogweather.ui.theme.FrogTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.sin
 
-private val TileBackground = Color(0xFF1C2733)
 private val TileShape = RoundedCornerShape(16.dp)
 
 fun dewPoint(tempC: Double, humidityPct: Int): Double {
-    val h = humidityPct.toDouble()
+    if (!tempC.isFinite()) return 0.0
+    val h = humidityPct.coerceIn(1, 100).toDouble()
     val t = tempC
+    val denomT = 243.04 + t
+    if (abs(denomT) < 1e-6 || !denomT.isFinite()) return t
     val lnH = ln(h / 100.0)
-    val numerator = 243.04 * (lnH + 17.625 * t / (243.04 + t))
-    val denominator = 17.625 - (lnH + 17.625 * t / (243.04 + t))
-    return numerator / denominator
+    val gamma = lnH + 17.625 * t / denomT
+    val numerator = 243.04 * gamma
+    val denominator = 17.625 - gamma
+    if (abs(denominator) < 1e-6 || !denominator.isFinite()) return t
+    val result = numerator / denominator
+    return if (result.isFinite()) result else t
 }
 
 fun windDirection(deg: Int): String {
     val dirs = arrayOf("N", "NO", "O", "SO", "S", "SW", "W", "NW")
-    return dirs[((deg + 22.5) / 45.0).toInt() % 8]
+    val normalized = ((deg % 360) + 360) % 360
+    return dirs[((normalized + 22.5) / 45.0).toInt() % 8]
 }
 
 @Composable
-fun WeatherDetailsGrid(details: WeatherDetails) {
+fun WeatherDetailsGrid(
+    details: WeatherDetails,
+    onOpenAnalysis: (() -> Unit)? = null
+) {
+    val palette = FrogTheme.palette
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text(
             text = "WETTERDETAILS",
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 12.sp,
             letterSpacing = 1.sp,
             modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
@@ -88,6 +105,18 @@ fun WeatherDetailsGrid(details: WeatherDetails) {
             HumidityTile(details.humidity, details.temperature, modifier = Modifier.weight(1f).aspectRatio(1f))
             DewPointTile(details.temperature, details.humidity, modifier = Modifier.weight(1f).aspectRatio(1f))
         }
+        // Row 5: UV-Index + Historischer Normalwert
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            val tileMod = Modifier
+                .weight(1f)
+                .aspectRatio(1f)
+                .let { if (onOpenAnalysis != null) it.clickable(onClick = onOpenAnalysis) else it }
+            UvIndexTile(details.uvIndex, modifier = tileMod)
+            HistoricalNormalTile(details.temperature, details.normalTempC, modifier = tileMod)
+        }
     }
 }
 
@@ -100,15 +129,16 @@ private fun TileBase(
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val palette = FrogTheme.palette
     Column(
         modifier = modifier
-            .background(TileBackground, shape = TileShape)
+            .background(palette.tileSurface, shape = TileShape)
             .padding(14.dp),
         horizontalAlignment = horizontalAlignment
     ) {
         Text(
             text = label.uppercase(),
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 14.sp,
             letterSpacing = 1.sp
         )
@@ -121,13 +151,14 @@ private fun TileBase(
 
 @Composable
 fun PrecipitationTile(rainMm: Double?, modifier: Modifier = Modifier) {
+    val palette = FrogTheme.palette
     val mm = rainMm ?: 0.0
     val noRain = mm == 0.0
     val subText = if (noRain) "Kein Niederschlag erwartet" else "${"%.1f".format(mm)} mm Niederschlag erwartet"
 
     Box(
         modifier = modifier
-            .background(Color(0xFF1A1A2E), shape = TileShape)
+            .background(palette.tileSurface, shape = TileShape)
             .padding(14.dp)
     ) {
         // Header: icon + label top-left
@@ -139,7 +170,7 @@ fun PrecipitationTile(rainMm: Double?, modifier: Modifier = Modifier) {
             Spacer(Modifier.width(6.dp))
             Text(
                 text = "Niederschlag",
-                color = Color.White,
+                color = palette.textPrimary,
                 fontSize = 14.sp,
                 letterSpacing = 1.sp
             )
@@ -148,7 +179,7 @@ fun PrecipitationTile(rainMm: Double?, modifier: Modifier = Modifier) {
         // Centre: mm value
         Text(
             text = "${"%.1f".format(mm)} mm",
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 32.sp,
             modifier = Modifier.align(Alignment.Center)
         )
@@ -156,7 +187,7 @@ fun PrecipitationTile(rainMm: Double?, modifier: Modifier = Modifier) {
         // Bottom: description
         Text(
             text = subText,
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 14.sp,
             modifier = Modifier.align(Alignment.BottomStart)
         )
@@ -167,16 +198,17 @@ fun PrecipitationTile(rainMm: Double?, modifier: Modifier = Modifier) {
 
 @Composable
 fun WindTile(speedMs: Double?, deg: Int?, modifier: Modifier = Modifier) {
+    val palette = FrogTheme.palette
     Column(
         modifier = modifier
-            .background(TileBackground, shape = TileShape)
+            .background(palette.tileSurface, shape = TileShape)
             .padding(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Header: larger like precipitation mm display
         Text(
             text = "WIND",
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 16.sp,
             letterSpacing = 1.sp
         )
@@ -199,13 +231,13 @@ fun WindTile(speedMs: Double?, deg: Int?, modifier: Modifier = Modifier) {
 
             // Outer ring
             drawCircle(
-                color = Color.White.copy(alpha = 0.15f),
+                color = palette.textPrimary.copy(alpha = 0.15f),
                 radius = radius,
                 style = Stroke(strokeW)
             )
             // Inner tick ring
             drawCircle(
-                color = Color.White.copy(alpha = 0.06f),
+                color = palette.textPrimary.copy(alpha = 0.06f),
                 radius = radius * 0.55f,
                 style = Stroke(strokeW * 0.5f)
             )
@@ -217,20 +249,20 @@ fun WindTile(speedMs: Double?, deg: Int?, modifier: Modifier = Modifier) {
                 val tailX = center.x - (radius * 0.35f) * cos(angleRad).toFloat()
                 val tailY = center.y - (radius * 0.35f) * sin(angleRad).toFloat()
                 drawLine(
-                    color = Color(0xFF4FC3F7),
+                    color = palette.accent,
                     start = Offset(tailX, tailY),
                     end = Offset(tipX, tipY),
                     strokeWidth = strokeW,
                     cap = StrokeCap.Round
                 )
                 drawCircle(
-                    color = Color(0xFF4FC3F7),
+                    color = palette.accent,
                     radius = dotR,
                     center = Offset(tipX, tipY)
                 )
                 // Centre dot
                 drawCircle(
-                    color = Color.White.copy(alpha = 0.35f),
+                    color = palette.textPrimary.copy(alpha = 0.35f),
                     radius = strokeW * 0.8f
                 )
             }
@@ -238,12 +270,12 @@ fun WindTile(speedMs: Double?, deg: Int?, modifier: Modifier = Modifier) {
 
         Text(
             text = kmh?.let { "${"%.0f".format(it)} km/h" } ?: "--",
-            color = Color.White,
+            color = palette.textPrimary,
             fontSize = 18.sp
         )
         Text(
             text = "Von $dir",
-            color = Color.White,
+            color = palette.textSecondary,
             fontSize = 14.sp
         )
     }
@@ -253,6 +285,7 @@ fun WindTile(speedMs: Double?, deg: Int?, modifier: Modifier = Modifier) {
 
 @Composable
 fun SunriseSunsetTile(sunriseEpoch: Long?, sunsetEpoch: Long?, modifier: Modifier = Modifier) {
+    val palette = FrogTheme.palette
     val fmt = DateTimeFormatter.ofPattern("HH:mm")
     val zone = ZoneId.systemDefault()
     val rise = sunriseEpoch ?: 0L
@@ -267,7 +300,7 @@ fun SunriseSunsetTile(sunriseEpoch: Long?, sunsetEpoch: Long?, modifier: Modifie
 
     Box(
         modifier = modifier
-            .background(TileBackground, shape = TileShape)
+            .background(palette.tileSurface, shape = TileShape)
             .padding(14.dp)
     ) {
         // Content column
@@ -279,7 +312,7 @@ fun SunriseSunsetTile(sunriseEpoch: Long?, sunsetEpoch: Long?, modifier: Modifie
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text = "Sonnenaufgang und Sonnenuntergang",
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 14.sp,
                     letterSpacing = 0.8.sp
                 )
@@ -402,12 +435,12 @@ fun SunriseSunsetTile(sunriseEpoch: Long?, sunsetEpoch: Long?, modifier: Modifie
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("↑", color = Color(0xFFFDD835), fontSize = 16.sp)
                     Spacer(Modifier.width(4.dp))
-                    Text(riseStr, color = Color.White, fontSize = 16.sp)
+                    Text(riseStr, color = palette.textPrimary, fontSize = 16.sp)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(setStr, color = Color.White, fontSize = 16.sp)
+                    Text(setStr, color = palette.textPrimary, fontSize = 16.sp)
                     Spacer(Modifier.width(4.dp))
-                    Text("↓", color = Color(0xFF90CAF9), fontSize = 16.sp)
+                    Text("↓", color = palette.accent, fontSize = 16.sp)
                 }
             }
         }
@@ -449,12 +482,13 @@ fun PressureBadgeTile(pressure: Int?, modifier: Modifier = Modifier) {
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 val fontSize = if (hpa >= 1000) 20.sp else 22.sp // Slightly smaller to fit
+                val textPrimary = FrogTheme.palette.textPrimary
                 Text(
                     text = if (hpa == 0) "--" else "$hpa",
-                    color = Color.White,
+                    color = textPrimary,
                     fontSize = fontSize
                 )
-                Text("hPa", color = Color.White, fontSize = 12.sp)
+                Text("hPa", color = textPrimary, fontSize = 12.sp)
             }
         }
         Text(text = desc, color = color, fontSize = 14.sp)
@@ -484,7 +518,7 @@ fun AirQualityTile(aqi: Int?, modifier: Modifier = Modifier) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = if (level == 0) "--" else level.toString(),
-                    color = Color.White,
+                    color = FrogTheme.palette.textPrimary,
                     fontSize = 80.sp
                 )
                 Text(text = label, color = color, fontSize = 14.sp)
@@ -659,9 +693,10 @@ fun VisibilityTile(visibilityM: Int?, modifier: Modifier = Modifier) {
                 )
             )
         }
+        val textPrimary = FrogTheme.palette.textPrimary
         Text(
             text = "${"%.1f".format(km)} km",
-            color = Color.White,
+            color = textPrimary,
             fontSize = 18.sp
         )
         Text(
@@ -670,7 +705,7 @@ fun VisibilityTile(visibilityM: Int?, modifier: Modifier = Modifier) {
                 km >= 5  -> "Gut"
                 else     -> "Eingeschränkt"
             },
-            color = Color.White,
+            color = FrogTheme.palette.textSecondary,
             fontSize = 14.sp
         )
     }
@@ -680,13 +715,14 @@ fun VisibilityTile(visibilityM: Int?, modifier: Modifier = Modifier) {
 
 @Composable
 fun HumidityTile(humidity: Int?, tempC: Double?, modifier: Modifier = Modifier) {
+    val palette = FrogTheme.palette
     val h = (humidity ?: 0).coerceIn(0, 100)
     val dp = if (tempC != null && humidity != null && humidity > 0) dewPoint(tempC, humidity) else null
     val fillFraction = h / 100f
 
     Box(
         modifier = modifier
-            .background(TileBackground, shape = TileShape)
+            .background(palette.tileSurface, shape = TileShape)
     ) {
         // Water fill canvas — drawn behind everything, covers full tile
         Canvas(modifier = Modifier.matchParentSize()) {
@@ -753,7 +789,7 @@ fun HumidityTile(humidity: Int?, tempC: Double?, modifier: Modifier = Modifier) 
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text = "Luftfeuchtigkeit",
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 15.sp,
                     letterSpacing = 1.sp
                 )
@@ -768,7 +804,7 @@ fun HumidityTile(humidity: Int?, tempC: Double?, modifier: Modifier = Modifier) 
             ) {
                 Text(
                     text = "$h%",
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 48.sp
                 )
             }
@@ -779,21 +815,21 @@ fun HumidityTile(humidity: Int?, tempC: Double?, modifier: Modifier = Modifier) 
                     Box(
                         modifier = Modifier
                             .background(
-                                Color.White.copy(alpha = 0.12f),
+                                palette.textPrimary.copy(alpha = 0.12f),
                                 shape = RoundedCornerShape(6.dp)
                             )
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
                             text = "${dpVal.toInt()}°",
-                            color = Color.White,
+                            color = palette.textPrimary,
                             fontSize = 14.sp
                         )
                     }
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text = "Taupunkt",
-                        color = Color.White,
+                        color = palette.textSecondary,
                         fontSize = 13.sp
                     )
                 }
@@ -838,11 +874,112 @@ fun DewPointTile(tempC: Double?, humidity: Int?, modifier: Modifier = Modifier) 
             }
             Text(
                 text = dp?.let { "${it.toInt()}°" } ?: "--",
-                color = Color.White,
+                color = FrogTheme.palette.textPrimary,
                 fontSize = 28.sp // Slightly smaller to fit
             )
         }
         // Larger label below
         Text(text = dpLabel, color = dpColor, fontSize = 16.sp)
+    }
+}
+
+// ── Tile: UV-Index ───────────────────────────────────────────────────────────
+
+@Composable
+fun UvIndexTile(uvIndex: Double?, modifier: Modifier = Modifier) {
+    val palette = FrogTheme.palette
+    val level = uvIndex?.takeIf { it.isFinite() }?.let { SportAdvisor.classifyUv(it) }
+    val riskColor = when (level) {
+        UvLevel.LOW -> Color(0xFF66BB6A)
+        UvLevel.MODERATE -> Color(0xFFFFD54F)
+        UvLevel.HIGH -> Color(0xFFFFA726)
+        UvLevel.VERY_HIGH -> Color(0xFFFF8A80)
+        UvLevel.EXTREME -> Color(0xFFCE93D8)
+        null -> palette.textSecondary
+    }
+
+    TileBase("UV-Index", modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val radius = size.minDimension / 2f * 0.80f
+                val strokeW = (radius * 0.10f).coerceAtLeast(4f)
+                drawCircle(color = riskColor.copy(alpha = 0.18f))
+                drawCircle(color = riskColor, radius = radius, style = Stroke(strokeW))
+            }
+            Text(
+                text = uvIndex?.takeIf { it.isFinite() }?.let {
+                    String.format(Locale.GERMAN, "%.1f", it)
+                } ?: "--",
+                color = palette.textPrimary,
+                fontSize = 26.sp
+            )
+        }
+        Text(
+            text = level?.label ?: "Lädt...",
+            color = riskColor,
+            fontSize = 14.sp
+        )
+    }
+}
+
+// ── Tile: Historischer Normalwert ────────────────────────────────────────────
+
+@Composable
+fun HistoricalNormalTile(
+    currentTempC: Double?,
+    normalTempC: Double?,
+    modifier: Modifier = Modifier
+) {
+    val palette = FrogTheme.palette
+    val delta = if (currentTempC != null && normalTempC != null &&
+        currentTempC.isFinite() && normalTempC.isFinite()
+    ) {
+        currentTempC - normalTempC
+    } else {
+        null
+    }
+    val deltaColor = when {
+        delta == null -> palette.textSecondary
+        abs(delta) < 0.5 -> Color(0xFF66BB6A)
+        delta > 0 -> Color(0xFFFFA726)
+        else -> Color(0xFF4FC3F7)
+    }
+
+    TileBase("Normalwert", modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = normalTempC?.takeIf { it.isFinite() }?.let {
+                        String.format(Locale.GERMAN, "%.1f°", it)
+                    } ?: "--",
+                    color = palette.textPrimary,
+                    fontSize = 34.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "üblich um diese Zeit",
+                    color = palette.textSecondary,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        Text(
+            text = delta?.let { String.format(Locale.GERMAN, "%+.1f °C Abweichung", it) } ?: "Analyse öffnen",
+            color = deltaColor,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

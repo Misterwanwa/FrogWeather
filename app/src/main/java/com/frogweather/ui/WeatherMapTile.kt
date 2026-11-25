@@ -1,14 +1,28 @@
 package com.frogweather.ui
 
 import android.annotation.SuppressLint
-import android.content.Context
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.view.MotionEvent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,10 +35,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,33 +65,34 @@ import androidx.lifecycle.LifecycleEventObserver
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.frogweather.BuildConfig
+import com.frogweather.map.MapLayerDataProvider
 import com.frogweather.service.DwdWarningFetcher
 import com.frogweather.service.WarningSource
 import com.frogweather.service.WeatherWarning
+import com.frogweather.ui.map.MapLibreStyleLoader
+import com.frogweather.ui.map.MapLibreWarningOverlay
+import com.frogweather.ui.theme.FrogTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import org.osmdroid.config.Configuration
-import org.osmdroid.events.DelayedMapListener
-import org.osmdroid.events.MapListener
-import org.osmdroid.events.ScrollEvent
-import org.osmdroid.events.ZoomEvent
-import org.osmdroid.tileprovider.MapTileProviderBasic
-import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.tileprovider.tilesource.XYTileSource
-import org.osmdroid.util.BoundingBox
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.util.MapTileIndex
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Polygon
-import org.osmdroid.views.overlay.TilesOverlay
-import java.io.File
+import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.geometry.LatLngBounds
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapLibreMapOptions
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
+import org.maplibre.android.style.layers.PropertyFactory
+import org.maplibre.android.style.layers.RasterLayer
+import org.maplibre.android.style.sources.RasterSource
+import org.maplibre.android.style.sources.TileSet
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
 
-// Available weather map layers from OpenWeatherMap (fast _new tile endpoints)
 enum class WeatherMapLayer(
     val displayName: String,
     val layerCode: String,
@@ -83,15 +108,24 @@ enum class WeatherMapLayer(
     SNOW("Schnee", "snow_new", "https://openweathermap.org/img/legend/snow.png")
 }
 
+data class LocalBoundingBox(
+    val latNorth: Double,
+    val lonEast: Double,
+    val latSouth: Double,
+    val lonWest: Double
+)
+
 private const val WARNING_POLL_INTERVAL_MS = 10_000L
 private const val OVERVIEW_ZOOM = 6.2
 private const val LOCAL_DIAMETER_KM = 15.0
+private const val COMPACT_WEATHER_SOURCE_ID = "frog-compact-weather-source"
+private const val COMPACT_WEATHER_LAYER_ID = "frog-compact-weather-layer"
 
 internal fun createLocalBoundingBox(
     lat: Double,
     lon: Double,
     diameterKm: Double = LOCAL_DIAMETER_KM
-): BoundingBox {
+): LocalBoundingBox {
     val radiusKm = diameterKm / 2.0
     val deltaLat = radiusKm / 111.32
     val cosLat = cos(Math.toRadians(lat)).coerceAtLeast(0.01)
@@ -100,72 +134,40 @@ internal fun createLocalBoundingBox(
     val south = (lat - deltaLat).coerceIn(-85.0, 85.0)
     val east = (lon + deltaLon).coerceIn(-180.0, 180.0)
     val west = (lon - deltaLon).coerceIn(-180.0, 180.0)
-    return BoundingBox(north, east, south, west)
-}
-
-@Volatile
-private var isOsmdroidConfigured = false
-
-/**
- * Configures osmdroid synchronously BEFORE any MapView instance is created so disk cache,
- * parallel download threads, and proper User-Agent take effect immediately.
- */
-private fun ensureOsmdroidConfigured(context: Context) {
-    if (isOsmdroidConfigured) return
-    synchronized(Configuration.getInstance()) {
-        if (isOsmdroidConfigured) return
-        val appContext = context.applicationContext
-        val baseDir = File(appContext.cacheDir, "osmdroid").apply { mkdirs() }
-        val tileDir = File(baseDir, "tiles").apply { mkdirs() }
-        Configuration.getInstance().apply {
-            userAgentValue = "${appContext.packageName}/1.0 (Android; FrogWeather)"
-            osmdroidBasePath = baseDir
-            osmdroidTileCache = tileDir
-            cacheMapTileCount = 96.toShort()
-            cacheMapTileOvershoot = 24.toShort()
-            tileDownloadThreads = 8.toShort()
-            tileFileSystemThreads = 8.toShort()
-            expirationExtendedDuration = 7L * 24L * 60L * 60L * 1000L
-        }
-        isOsmdroidConfigured = true
-    }
-}
-
-private fun createFastBaseTileSource(): XYTileSource {
-    return XYTileSource(
-        "OSM_DE_FAST",
-        0,
-        18,
-        256,
-        ".png",
-        arrayOf(
-            "https://a.tile.openstreetmap.de/",
-            "https://b.tile.openstreetmap.de/",
-            "https://c.tile.openstreetmap.de/"
-        ),
-        "© OpenStreetMap contributors"
+    return LocalBoundingBox(
+        latNorth = north,
+        lonEast = east,
+        latSouth = south,
+        lonWest = west
     )
 }
 
-private class MapOverlayController(val mapView: MapView) {
+private class CompactMapController {
+    var mapLibreMap: MapLibreMap? = null
+    var styleReady: Boolean = false
+    var loadedStyleJson: String? = null
+    var libertyApplied: Boolean = false
     var currentLayer: WeatherMapLayer? = null
-    var weatherOverlay: TilesOverlay? = null
     var lastCenteredLat: Double? = null
     var lastCenteredLon: Double? = null
-    var warningOverlays: MutableList<Polygon> = mutableListOf()
     var lastWarningsSignature: String? = null
     var lastFocusToken: Int = 0
     var lastLocalizeToken: Int = 0
+    var latestWarnings: List<WeatherWarning> = emptyList()
+    var latestShowWarnings: Boolean = true
+    var latestSelectedWarningId: String? = null
+    var latestLayer: WeatherMapLayer = WeatherMapLayer.PRECIPITATION
 }
 
 @Composable
 fun WeatherMapTile(
     latitude: Double,
     longitude: Double,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    expandMapToFill: Boolean = false,
+    onOpenFullMap: (() -> Unit)? = null
 ) {
-    val context = LocalContext.current
-    ensureOsmdroidConfigured(context)
+    val palette = FrogTheme.palette
 
     var selectedLayer by remember { mutableStateOf(WeatherMapLayer.PRECIPITATION) }
     var showWarnings by remember { mutableStateOf(true) }
@@ -176,13 +178,12 @@ fun WeatherMapTile(
     var isLoadingWarnings by remember { mutableStateOf(false) }
     var lastUpdatedText by remember { mutableStateOf<String?>(null) }
     var refreshTick by remember { mutableIntStateOf(0) }
-    var focusTarget by remember { mutableStateOf<GeoPoint?>(null) }
+    var focusTarget by remember { mutableStateOf<LatLng?>(null) }
     var focusToken by remember { mutableIntStateOf(0) }
     var isLocalizedView by remember { mutableStateOf(false) }
     var localizeToLocalMode by remember { mutableStateOf(true) }
     var localizeToken by remember { mutableIntStateOf(0) }
 
-    // Sync map polling center when user picks a new city / GPS location
     LaunchedEffect(latitude, longitude) {
         mapCenterLat = latitude
         mapCenterLon = longitude
@@ -199,7 +200,6 @@ fun WeatherMapTile(
         else -> "GLOBAL"
     }
 
-    // Real-time warning polling (immediate fetch + 10s interval)
     LaunchedEffect(mapCenterLat, mapCenterLon, showWarnings, refreshTick) {
         if (!showWarnings) {
             isLoadingWarnings = false
@@ -220,12 +220,10 @@ fun WeatherMapTile(
     }
 
     Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Color(0xFF1C2733), shape = RoundedCornerShape(16.dp))
+        modifier = (if (expandMapToFill) modifier.fillMaxSize() else modifier.fillMaxWidth())
+            .background(palette.tileSurface, shape = RoundedCornerShape(16.dp))
             .padding(14.dp)
     ) {
-        // Header with live indicator and layer selector
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -234,9 +232,10 @@ fun WeatherMapTile(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "WETTERKARTE",
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 14.sp,
-                    letterSpacing = 1.sp
+                    letterSpacing = 1.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(
@@ -247,7 +246,7 @@ fun WeatherMapTile(
                         modifier = Modifier
                             .size(7.dp)
                             .clip(CircleShape)
-                            .background(if (showWarnings) Color(0xFF4CAF50) else Color.Gray)
+                            .background(if (showWarnings) Color(0xFF4CAF50) else palette.textSecondary)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
@@ -256,36 +255,56 @@ fun WeatherMapTile(
                             append(providerLabel)
                             lastUpdatedText?.let { append(" • $it") }
                         },
-                        color = Color.White.copy(alpha = 0.72f),
+                        color = palette.textSecondary,
                         fontSize = 10.sp
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = Icons.Default.Refresh,
                         contentDescription = "Warnungen aktualisieren",
-                        tint = Color(0xFF4FC3F7),
+                        tint = palette.accent,
                         modifier = Modifier.size(13.dp)
                     )
                 }
             }
 
-            // Layer selector dropdown
-            LayerSelector(
-                selectedLayer = selectedLayer,
-                onLayerSelected = { selectedLayer = it }
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                LayerSelector(
+                    selectedLayer = selectedLayer,
+                    onLayerSelected = { selectedLayer = it }
+                )
+                if (onOpenFullMap != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(palette.tileSurfaceElevated)
+                            .clickable(onClick = onOpenFullMap),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Fullscreen,
+                            contentDescription = "Vollbildkarte & 3D-Globus öffnen",
+                            tint = palette.accent,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Warning overlay toggle chip & status
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val chipBg = if (showWarnings) Color(0xFFEF5350).copy(alpha = 0.2f) else Color.White.copy(alpha = 0.08f)
-            val chipBorder = if (showWarnings) Color(0xFFEF5350).copy(alpha = 0.7f) else Color.White.copy(alpha = 0.2f)
+            val chipBg = if (showWarnings) Color(0xFFEF5350).copy(alpha = 0.2f) else palette.tileSurfaceElevated
+            val chipBorder = if (showWarnings) Color(0xFFEF5350).copy(alpha = 0.7f) else palette.dividerColor
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
@@ -301,7 +320,7 @@ fun WeatherMapTile(
                 Icon(
                     imageVector = Icons.Default.Warning,
                     contentDescription = null,
-                    tint = if (showWarnings) Color(0xFFFFB74D) else Color.White.copy(alpha = 0.6f),
+                    tint = if (showWarnings) Color(0xFFFFB74D) else palette.textSecondary,
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
@@ -311,7 +330,7 @@ fun WeatherMapTile(
                     } else {
                         "Warnungen aus"
                     },
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 12.sp
                 )
             }
@@ -319,13 +338,13 @@ fun WeatherMapTile(
             if (isLoadingWarnings) {
                 Text(
                     text = "Lade Warngebiete...",
-                    color = Color(0xFF4FC3F7),
+                    color = palette.accent,
                     fontSize = 11.sp
                 )
             } else if (showWarnings && mapWarnings.isEmpty()) {
                 Text(
                     text = if (isUs || isDwd) "Keine aktiven Warnungen" else "Warngebiete: DE & USA",
-                    color = Color.White.copy(alpha = 0.55f),
+                    color = palette.textSecondary,
                     fontSize = 11.sp
                 )
             }
@@ -333,12 +352,12 @@ fun WeatherMapTile(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Map with legend overlay
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(12.dp))
+            modifier = (if (expandMapToFill) {
+                Modifier.fillMaxWidth().weight(1f)
+            } else {
+                Modifier.fillMaxWidth().aspectRatio(1f)
+            }).clip(RoundedCornerShape(12.dp))
         ) {
             WeatherMap(
                 latitude = latitude,
@@ -365,16 +384,17 @@ fun WeatherMapTile(
                 }
             )
 
-            selectedLayer.legendUrl?.let { url ->
-                LegendImage(
-                    legendUrl = url,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(8.dp)
-                )
+            if (MapLayerDataProvider.isValidOwmKey(BuildConfig.OPENWEATHER_API_KEY)) {
+                selectedLayer.legendUrl?.let { url ->
+                    LegendImage(
+                        legendUrl = url,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                    )
+                }
             }
 
-            // Localize button: switches between Germany/overview map and ~15 km local view
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -382,12 +402,12 @@ fun WeatherMapTile(
                     .size(42.dp)
                     .clip(CircleShape)
                     .background(
-                        if (isLocalizedView) Color(0xFF4FC3F7)
-                        else Color(0xFF1C2733).copy(alpha = 0.9f)
+                        if (isLocalizedView) palette.accent
+                        else palette.tileSurface.copy(alpha = 0.94f)
                     )
                     .border(
                         width = 1.dp,
-                        color = if (isLocalizedView) Color.White.copy(alpha = 0.9f) else Color(0xFF4FC3F7).copy(alpha = 0.7f),
+                        color = if (isLocalizedView) palette.screenBackground.copy(alpha = 0.85f) else palette.accent.copy(alpha = 0.7f),
                         shape = CircleShape
                     )
                     .clickable {
@@ -403,13 +423,12 @@ fun WeatherMapTile(
                 Icon(
                     imageVector = Icons.Default.MyLocation,
                     contentDescription = if (isLocalizedView) "Zur Übersichtskarte" else "Auf 15-km-Umkreis lokalisieren",
-                    tint = if (isLocalizedView) Color(0xFF0E1A24) else Color(0xFF4FC3F7),
+                    tint = if (isLocalizedView) palette.screenBackground else palette.accent,
                     modifier = Modifier.size(22.dp)
                 )
             }
         }
 
-        // Quick-select warning chips below map
         if (showWarnings && mapWarnings.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))
             Row(
@@ -426,11 +445,11 @@ fun WeatherMapTile(
                             .clip(RoundedCornerShape(10.dp))
                             .background(
                                 if (isSelected) accentColor.copy(alpha = 0.28f)
-                                else Color.White.copy(alpha = 0.08f)
+                                else palette.tileSurfaceElevated
                             )
                             .border(
                                 width = if (isSelected) 1.5.dp else 1.dp,
-                                color = if (isSelected) accentColor else Color.White.copy(alpha = 0.16f),
+                                color = if (isSelected) accentColor else palette.dividerColor,
                                 shape = RoundedCornerShape(10.dp)
                             )
                             .clickable {
@@ -456,7 +475,7 @@ fun WeatherMapTile(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "${warning.title} • ${warning.area}",
-                            color = Color.White,
+                            color = palette.textPrimary,
                             fontSize = 11.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -467,7 +486,6 @@ fun WeatherMapTile(
             }
         }
 
-        // Interactive detail card for tapped warning polygon/chip
         selectedWarning?.let { warning ->
             Spacer(modifier = Modifier.height(10.dp))
             SelectedWarningCard(
@@ -478,7 +496,6 @@ fun WeatherMapTile(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Description text
         Text(
             text = when (selectedLayer) {
                 WeatherMapLayer.PRECIPITATION -> "Niederschlag in mm/h"
@@ -488,25 +505,27 @@ fun WeatherMapTile(
                 WeatherMapLayer.WIND -> "Windgeschwindigkeit in m/s"
                 WeatherMapLayer.PRESSURE -> "Luftdruck in hPa"
                 WeatherMapLayer.SNOW -> "Schneefall in mm/h"
-                WeatherMapLayer.NONE -> "OpenStreetMap Basis"
+                WeatherMapLayer.NONE -> "MapLibre Basiskarte"
             },
-            color = Color.White.copy(alpha = 0.6f),
+            color = palette.textSecondary,
             fontSize = 12.sp
         )
     }
 }
 
 @Composable
-private fun SelectedWarningCard(
+internal fun SelectedWarningCard(
     warning: WeatherWarning,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
+    val palette = FrogTheme.palette
     val accent = Color(warning.customColorRgb ?: warning.severity.color)
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF233242))
+            .background(palette.tileSurfaceElevated)
             .border(1.dp, accent.copy(alpha = 0.8f), RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
@@ -519,23 +538,34 @@ private fun SelectedWarningCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.weight(1f)
             ) {
-                Box(
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(accent.copy(alpha = 0.25f))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .background(palette.tileSurface)
+                        .border(1.dp, accent.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(accent)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "${warning.source.badgeText} • ${warning.severity.germanName}",
-                        color = accent,
+                        color = palette.textPrimary,
                         fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = warning.title,
-                    color = Color.White,
+                    color = palette.textPrimary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -549,7 +579,7 @@ private fun SelectedWarningCard(
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Schließen",
-                    tint = Color.White.copy(alpha = 0.7f),
+                    tint = palette.textSecondary,
                     modifier = Modifier.size(16.dp)
                 )
             }
@@ -557,14 +587,14 @@ private fun SelectedWarningCard(
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = "${warning.area} • ${warning.startTime} - ${warning.endTime}",
-            color = Color.White.copy(alpha = 0.75f),
+            color = palette.textSecondary,
             fontSize = 11.sp
         )
         if (warning.description.isNotBlank()) {
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = warning.description,
-                color = Color.White.copy(alpha = 0.92f),
+                color = palette.textPrimary,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
                 maxLines = 6,
@@ -612,33 +642,37 @@ private fun LayerSelector(
     selectedLayer: WeatherMapLayer,
     onLayerSelected: (WeatherMapLayer) -> Unit
 ) {
+    val palette = FrogTheme.palette
     var expanded by remember { mutableStateOf(false) }
 
     Box {
         Row(
             modifier = Modifier
-                .background(Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.tileSurfaceElevated)
                 .clickable { expanded = true }
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = selectedLayer.displayName,
-                color = Color(0xFF4FC3F7),
-                fontSize = 13.sp
+                color = palette.accent,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Icon(
                 imageVector = if (expanded) Icons.Default.ArrowDropUp else Icons.Default.ArrowDropDown,
                 contentDescription = null,
-                tint = Color(0xFF4FC3F7),
-                modifier = Modifier.size(20.dp)
+                tint = palette.accent,
+                modifier = Modifier.size(18.dp)
             )
         }
 
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
-            modifier = Modifier.background(Color(0xFF2A3A4A))
+            modifier = Modifier.background(palette.tileSurfaceElevated)
         ) {
             WeatherMapLayer.entries.forEach { layer ->
                 DropdownMenuItem(
@@ -649,7 +683,7 @@ private fun LayerSelector(
                 ) {
                     Text(
                         text = layer.displayName,
-                        color = if (layer == selectedLayer) Color(0xFF4FC3F7) else Color.White,
+                        color = if (layer == selectedLayer) palette.accent else palette.textPrimary,
                         fontSize = 14.sp
                     )
                 }
@@ -667,7 +701,7 @@ private fun WeatherMap(
     warnings: List<WeatherWarning>,
     showWarnings: Boolean,
     selectedWarningId: String?,
-    focusTarget: GeoPoint?,
+    focusTarget: LatLng?,
     focusToken: Int,
     localizeToLocalMode: Boolean,
     localizeToken: Int,
@@ -678,20 +712,14 @@ private fun WeatherMap(
     val lifecycleOwner = LocalLifecycleOwner.current
     val latestOnMapCenterChanged by rememberUpdatedState(onMapCenterChanged)
     val latestOnWarningClicked by rememberUpdatedState(onWarningClicked)
+    val controller = remember { CompactMapController() }
 
     val mapView = remember {
-        ensureOsmdroidConfigured(context)
-        MapView(context).apply {
-            setTileSource(createFastBaseTileSource())
-            setMultiTouchControls(true)
-            isTilesScaledToDpi = true
-            isHorizontalMapRepetitionEnabled = false
-            isVerticalMapRepetitionEnabled = false
-            minZoomLevel = 3.0
-            maxZoomLevel = 16.0
-            controller.setZoom(OVERVIEW_ZOOM)
-            controller.setCenter(GeoPoint(latitude, longitude))
-
+        MapLibre.getInstance(context.applicationContext)
+        val options = MapLibreMapOptions.createFromAttributes(context)
+            .textureMode(true)
+        MapView(context, options).apply {
+            onCreate(null)
             setOnTouchListener { v, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN,
@@ -701,195 +729,260 @@ private fun WeatherMap(
                 }
                 false
             }
-
-            addMapListener(
-                DelayedMapListener(
-                    object : MapListener {
-                        override fun onScroll(event: ScrollEvent?): Boolean {
-                            val center = mapCenter
-                            latestOnMapCenterChanged(center.latitude, center.longitude)
-                            return false
-                        }
-
-                        override fun onZoom(event: ZoomEvent?): Boolean {
-                            val center = mapCenter
-                            latestOnMapCenterChanged(center.latitude, center.longitude)
-                            return false
-                        }
-                    },
-                    450L
+            getMapAsync { mapLibreMap ->
+                controller.mapLibreMap = mapLibreMap
+                mapLibreMap.uiSettings.isAttributionEnabled = false
+                mapLibreMap.uiSettings.isLogoEnabled = false
+                mapLibreMap.setMinPitchPreference(0.0)
+                mapLibreMap.setMaxPitchPreference(45.0)
+                mapLibreMap.moveCamera(
+                    CameraUpdateFactory.newCameraPosition(
+                        CameraPosition.Builder()
+                            .target(LatLng(latitude, longitude))
+                            .zoom(OVERVIEW_ZOOM)
+                            .tilt(0.0)
+                            .bearing(0.0)
+                            .build()
+                    )
                 )
-            )
+                controller.lastCenteredLat = latitude
+                controller.lastCenteredLon = longitude
 
-            tag = MapOverlayController(this)
-            onResume()
+                mapLibreMap.addOnCameraIdleListener {
+                    val target = mapLibreMap.cameraPosition.target ?: return@addOnCameraIdleListener
+                    latestOnMapCenterChanged(target.latitude, target.longitude)
+                }
+
+                mapLibreMap.addOnMapClickListener { point ->
+                    val warningsList = controller.latestWarnings
+                    if (!controller.latestShowWarnings || warningsList.isEmpty()) {
+                        return@addOnMapClickListener false
+                    }
+                    val match = MapLibreWarningOverlay.findClickedWarning(
+                        mapLibreMap = mapLibreMap,
+                        lat = point.latitude,
+                        lon = point.longitude,
+                        warnings = warningsList
+                    )
+                    if (match != null) {
+                        latestOnWarningClicked(match)
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                val initialStyleJson = controller.loadedStyleJson
+                if (initialStyleJson != null) {
+                    controller.libertyApplied = true
+                    mapLibreMap.setStyle(Style.Builder().fromJson(initialStyleJson)) { style ->
+                        controller.styleReady = true
+                        applyCompactWeatherLayer(style, controller.latestLayer)
+                        MapLibreWarningOverlay.applyWarnings(
+                            style = style,
+                            warnings = controller.latestWarnings,
+                            showWarnings = controller.latestShowWarnings,
+                            selectedWarningId = controller.latestSelectedWarningId
+                        )
+                    }
+                } else {
+                    val fallbackStyleJson = MapLibreStyleLoader.buildFallbackRasterStyleJson(
+                        isGlobe = false,
+                        darkTheme = false
+                    )
+                    mapLibreMap.setStyle(Style.Builder().fromJson(fallbackStyleJson)) { style ->
+                        controller.styleReady = true
+                        applyCompactWeatherLayer(style, controller.latestLayer)
+                        MapLibreWarningOverlay.applyWarnings(
+                            style = style,
+                            warnings = controller.latestWarnings,
+                            showWarnings = controller.latestShowWarnings,
+                            selectedWarningId = controller.latestSelectedWarningId
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // Upgrade base style to OpenFreeMap Liberty if reachable
+    LaunchedEffect(mapView) {
+        val styleJson = MapLibreStyleLoader.loadStyleJson(
+            context = context,
+            isGlobe = false,
+            preferDarkFallback = false
+        )
+        controller.loadedStyleJson = styleJson
+        var map = controller.mapLibreMap
+        var attempts = 0
+        while (map == null && attempts < 40) {
+            delay(50)
+            map = controller.mapLibreMap
+            attempts++
+        }
+        val activeMap = map ?: return@LaunchedEffect
+        if (controller.libertyApplied) return@LaunchedEffect
+        controller.libertyApplied = true
+        activeMap.setStyle(Style.Builder().fromJson(styleJson)) { style ->
+            controller.styleReady = true
+            applyCompactWeatherLayer(style, controller.latestLayer)
+            MapLibreWarningOverlay.applyWarnings(
+                style = style,
+                warnings = controller.latestWarnings,
+                showWarnings = controller.latestShowWarnings,
+                selectedWarningId = controller.latestSelectedWarningId
+            )
         }
     }
 
     DisposableEffect(lifecycleOwner, mapView) {
+        var isDestroyed = false
+        val lowMemoryCallback = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW && !isDestroyed) {
+                    mapView.onLowMemory()
+                }
+            }
+
+            override fun onConfigurationChanged(newConfig: Configuration) = Unit
+
+            @Deprecated("Deprecated in Java")
+            override fun onLowMemory() {
+                if (!isDestroyed) mapView.onLowMemory()
+            }
+        }
+        context.applicationContext.registerComponentCallbacks(lowMemoryCallback)
+
         val observer = LifecycleEventObserver { _, event ->
+            if (isDestroyed) return@LifecycleEventObserver
             when (event) {
+                Lifecycle.Event.ON_START -> mapView.onStart()
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_STOP -> mapView.onStop()
+                Lifecycle.Event.ON_DESTROY -> {
+                    isDestroyed = true
+                    mapView.onDestroy()
+                }
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            mapView.onStart()
+        }
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            mapView.onResume()
+        }
+
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            mapView.onPause()
-            mapView.onDetach()
+            context.applicationContext.unregisterComponentCallbacks(lowMemoryCallback)
+            if (!isDestroyed) {
+                isDestroyed = true
+                mapView.onPause()
+                mapView.onStop()
+                mapView.onDestroy()
+            }
         }
     }
 
     AndroidView(
         factory = { mapView },
         update = { view ->
-            val controller = (view.tag as? MapOverlayController)
-                ?: MapOverlayController(view).also { view.tag = it }
+            controller.latestLayer = layer
+            controller.latestWarnings = warnings
+            controller.latestShowWarnings = showWarnings
+            controller.latestSelectedWarningId = selectedWarningId
 
-            var needsInvalidate = false
+            val map = controller.mapLibreMap ?: return@AndroidView
 
             if (controller.lastCenteredLat != latitude || controller.lastCenteredLon != longitude) {
                 val isCitySwitch = controller.lastCenteredLat != null
-                view.controller.setCenter(GeoPoint(latitude, longitude))
-                if (isCitySwitch) {
-                    view.controller.setZoom(OVERVIEW_ZOOM)
-                }
+                map.moveCamera(
+                    CameraUpdateFactory.newCameraPosition(
+                        CameraPosition.Builder()
+                            .target(LatLng(latitude, longitude))
+                            .zoom(if (isCitySwitch) OVERVIEW_ZOOM else map.cameraPosition.zoom)
+                            .tilt(0.0)
+                            .build()
+                    )
+                )
                 controller.lastCenteredLat = latitude
                 controller.lastCenteredLon = longitude
-                needsInvalidate = true
             }
 
             if (controller.lastLocalizeToken != localizeToken) {
                 controller.lastLocalizeToken = localizeToken
                 if (localizeToLocalMode) {
-                    val localBox = createLocalBoundingBox(latitude, longitude, LOCAL_DIAMETER_KM)
-                    if (view.width > 0 && view.height > 0) {
-                        view.zoomToBoundingBox(localBox, true)
-                    } else {
-                        view.post { view.zoomToBoundingBox(localBox, true) }
-                    }
+                    val box = createLocalBoundingBox(latitude, longitude, LOCAL_DIAMETER_KM)
+                    val bounds = LatLngBounds.from(box.latNorth, box.lonEast, box.latSouth, box.lonWest)
+                    val paddingPx = (24 * view.resources.displayMetrics.density).toInt()
+                    map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, paddingPx), 600)
                 } else {
-                    view.controller.animateTo(GeoPoint(latitude, longitude), OVERVIEW_ZOOM, 600L)
+                    map.animateCamera(
+                        CameraUpdateFactory.newCameraPosition(
+                            CameraPosition.Builder()
+                                .target(LatLng(latitude, longitude))
+                                .zoom(OVERVIEW_ZOOM)
+                                .tilt(0.0)
+                                .build()
+                        ),
+                        600
+                    )
                 }
-                needsInvalidate = true
             }
 
             if (focusTarget != null && controller.lastFocusToken != focusToken) {
-                view.controller.animateTo(focusTarget)
                 controller.lastFocusToken = focusToken
-            }
-
-            if (controller.currentLayer != layer) {
-                updateWeatherOverlay(controller, layer)
-                needsInvalidate = true
-            }
-
-            val signature = buildWarningsSignature(warnings, showWarnings, selectedWarningId)
-            if (controller.lastWarningsSignature != signature) {
-                updateWarningPolygons(
-                    controller = controller,
-                    warnings = warnings,
-                    showWarnings = showWarnings,
-                    selectedWarningId = selectedWarningId,
-                    onWarningClicked = { latestOnWarningClicked(it) }
+                map.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(focusTarget, 8.5),
+                    500
                 )
-                controller.lastWarningsSignature = signature
-                needsInvalidate = true
             }
 
-            if (needsInvalidate) {
-                view.invalidate()
-            }
-        }
-    )
-}
-
-private fun updateWeatherOverlay(controller: MapOverlayController, layer: WeatherMapLayer) {
-    val mapView = controller.mapView
-    controller.weatherOverlay?.let { oldOverlay ->
-        mapView.overlays.remove(oldOverlay)
-        oldOverlay.onDetach(mapView)
-        controller.weatherOverlay = null
-    }
-
-    if (layer != WeatherMapLayer.NONE) {
-        val weatherTileSource = object : OnlineTileSourceBase(
-            "OpenWeatherMap_${layer.name}",
-            0,
-            16,
-            256,
-            ".png",
-            arrayOf("https://tile.openweathermap.org/map/")
-        ) {
-            override fun getTileURLString(pMapTileIndex: Long): String {
-                val x = MapTileIndex.getX(pMapTileIndex)
-                val y = MapTileIndex.getY(pMapTileIndex)
-                val z = MapTileIndex.getZoom(pMapTileIndex)
-                return "https://tile.openweathermap.org/map/${layer.layerCode}/$z/$x/$y.png?appid=${BuildConfig.OPENWEATHER_API_KEY}"
-            }
-        }
-
-        val tileProvider = MapTileProviderBasic(mapView.context, weatherTileSource)
-        val tilesOverlay = TilesOverlay(tileProvider, mapView.context).apply {
-            loadingBackgroundColor = android.graphics.Color.TRANSPARENT
-            loadingLineColor = android.graphics.Color.TRANSPARENT
-            setColorFilter(null)
-        }
-
-        // Insert at index 0 so warning polygons stay rendered on top of the weather overlay
-        mapView.overlays.add(0, tilesOverlay)
-        controller.weatherOverlay = tilesOverlay
-    }
-    controller.currentLayer = layer
-}
-
-private fun updateWarningPolygons(
-    controller: MapOverlayController,
-    warnings: List<WeatherWarning>,
-    showWarnings: Boolean,
-    selectedWarningId: String?,
-    onWarningClicked: (WeatherWarning) -> Unit
-) {
-    val mapView = controller.mapView
-    controller.warningOverlays.forEach { poly ->
-        mapView.overlays.remove(poly)
-        poly.onDetach(mapView)
-    }
-    controller.warningOverlays.clear()
-
-    if (!showWarnings || warnings.isEmpty()) return
-
-    val orderedWarnings = warnings.sortedWith(
-        compareBy<WeatherWarning> { it.id == selectedWarningId }
-            .thenBy { it.severity.level }
-    )
-
-    for (warning in orderedWarnings) {
-        if (warning.polygons.isEmpty()) continue
-        val isSelected = warning.id == selectedWarningId
-        val baseRgb = (warning.customColorRgb ?: warning.severity.color).toInt() and 0x00FFFFFF
-        val fillColor = ((if (isSelected) 0x80 else 0x4D) shl 24) or baseRgb
-        val strokeColor = ((if (isSelected) 0xFF else 0xF0) shl 24) or baseRgb
-        val strokeWidth = if (isSelected) 7f else 4f
-
-        for (ring in warning.polygons) {
-            if (ring.size < 3) continue
-            val polygon = Polygon(mapView).apply {
-                setPoints(ring.map { GeoPoint(it.lat, it.lon) })
-                setFillColor(fillColor)
-                setStrokeColor(strokeColor)
-                setStrokeWidth(strokeWidth)
-                title = warning.title
-                setOnClickListener { _, _, _ ->
-                    onWarningClicked(warning)
-                    true
+            val style = map.style
+            if (style != null && style.isFullyLoaded && controller.styleReady) {
+                if (controller.currentLayer != layer) {
+                    applyCompactWeatherLayer(style, layer)
+                    controller.currentLayer = layer
+                }
+                val signature = buildWarningsSignature(warnings, showWarnings, selectedWarningId)
+                if (controller.lastWarningsSignature != signature) {
+                    MapLibreWarningOverlay.applyWarnings(
+                        style = style,
+                        warnings = warnings,
+                        showWarnings = showWarnings,
+                        selectedWarningId = selectedWarningId
+                    )
+                    controller.lastWarningsSignature = signature
                 }
             }
-            mapView.overlays.add(polygon)
-            controller.warningOverlays.add(polygon)
         }
+    )
+}
+
+private fun applyCompactWeatherLayer(style: Style, layer: WeatherMapLayer) {
+    style.removeLayer(COMPACT_WEATHER_LAYER_ID)
+    style.removeSource(COMPACT_WEATHER_SOURCE_ID)
+
+    if (layer == WeatherMapLayer.NONE) return
+    val apiKey = BuildConfig.OPENWEATHER_API_KEY
+    if (!MapLayerDataProvider.isValidOwmKey(apiKey)) return
+
+    val tileUrl = "https://tile.openweathermap.org/map/${layer.layerCode}/{z}/{x}/{y}.png?appid=${apiKey.trim()}"
+    val tileSet = TileSet("2.2.0", tileUrl).apply {
+        minZoom = 0f
+        maxZoom = 12f
+    }
+    style.addSource(RasterSource(COMPACT_WEATHER_SOURCE_ID, tileSet, 256))
+    val rasterLayer = RasterLayer(COMPACT_WEATHER_LAYER_ID, COMPACT_WEATHER_SOURCE_ID).withProperties(
+        PropertyFactory.rasterOpacity(0.65f)
+    )
+    if (style.getLayer(MapLibreWarningOverlay.WARNING_FILL_LAYER_ID) != null) {
+        style.addLayerBelow(rasterLayer, MapLibreWarningOverlay.WARNING_FILL_LAYER_ID)
+    } else {
+        style.addLayer(rasterLayer)
     }
 }
 
@@ -911,7 +1004,7 @@ private fun buildWarningsSignature(
     }
 }
 
-private fun computePolygonCentroid(warning: WeatherWarning): GeoPoint? {
+private fun computePolygonCentroid(warning: WeatherWarning): LatLng? {
     val ring = warning.polygons.firstOrNull { it.isNotEmpty() } ?: return null
     var sumLat = 0.0
     var sumLon = 0.0
@@ -919,5 +1012,5 @@ private fun computePolygonCentroid(warning: WeatherWarning): GeoPoint? {
         sumLat += pt.lat
         sumLon += pt.lon
     }
-    return GeoPoint(sumLat / ring.size, sumLon / ring.size)
+    return LatLng(sumLat / ring.size, sumLon / ring.size)
 }

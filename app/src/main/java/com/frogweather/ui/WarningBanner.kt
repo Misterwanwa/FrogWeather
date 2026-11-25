@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.frogweather.service.WarningSeverity
 import com.frogweather.service.WeatherWarning
+import com.frogweather.ui.theme.FrogTheme
 
 @Composable
 fun WarningBanner(
@@ -133,7 +134,7 @@ fun WarningBanners(
         if (warnings.size > 1) {
             Text(
                 text = "+ ${warnings.size - 1} weitere Warnung(en)",
-                color = Color.White.copy(alpha = 0.6f),
+                color = FrogTheme.palette.textSecondary,
                 fontSize = 11.sp,
                 modifier = Modifier.padding(start = 4.dp)
             )
