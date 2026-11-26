@@ -43,6 +43,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.frogweather.ui.FrogVideoSelector
 import com.frogweather.analysis.ForecastConfidenceEngine
 import com.frogweather.analysis.HistoricalNormalCalculator
 import com.frogweather.analysis.HourlyWeatherPoint
@@ -1944,7 +1945,12 @@ fun FrogWeatherApp(
 
                                 Spacer(modifier = Modifier.height(24.dp))
 
-                                FrogAnimation(type = currentWeather ?: WeatherType.OTHER)
+                                FrogAnimation(
+                                    type = currentWeather ?: WeatherType.OTHER,
+                                    scenario = currentWeatherScenario,
+                                    isNight = isNight,
+                                    details = details
+                                )
 
                                 Spacer(modifier = Modifier.height(24.dp))
 
@@ -2432,33 +2438,69 @@ fun DailyForecast(items: List<MainActivity.DailyEntry>) {
 }
 
 @Composable
-fun FrogAnimation(type: WeatherType) {
+fun FrogAnimation(
+    type: WeatherType,
+    scenario: WeatherScenario? = null,
+    isNight: Boolean = false,
+    details: WeatherDetails? = null
+) {
     val palette = FrogTheme.palette
     val context = LocalContext.current
+    var variantIndex by remember(type, scenario, isNight) { mutableStateOf(0) }
 
-    val videoRes: Int? = when (type) {
-        WeatherType.RAINY  -> R.raw.rain
-        WeatherType.SUNNY  -> R.raw.sunny
-        WeatherType.CLOUDY -> R.raw.cloudy
-        else -> null
+    val candidates = remember(
+        type,
+        scenario,
+        isNight,
+        details?.sunrise,
+        details?.sunset,
+        details?.windSpeed,
+        details?.temperature,
+        details?.humidity,
+        details?.rainMm
+    ) {
+        FrogVideoSelector.selectCandidates(
+            weatherType = type,
+            scenario = scenario,
+            sunriseEpochSeconds = details?.sunrise,
+            sunsetEpochSeconds = details?.sunset,
+            isNightFallback = isNight,
+            windSpeedMs = details?.windSpeed,
+            temperatureC = details?.temperature,
+            humidityPct = details?.humidity,
+            rainMm = details?.rainMm
+        )
+    }
+    val selectedVideo = candidates[variantIndex % candidates.size]
+    val videoUri = remember(selectedVideo.fileName) {
+        android.net.Uri.parse("asset:///frog_videos/${selectedVideo.fileName}")
     }
 
-    if (videoRes != null) {
-        val player = remember(videoRes) {
-            ExoPlayer.Builder(context).build().apply {
-                val uri = android.net.Uri.parse("android.resource://${context.packageName}/$videoRes")
-                setMediaItem(MediaItem.fromUri(uri))
-                repeatMode = Player.REPEAT_MODE_ALL
-                volume = 0f
-                prepare()
-                playWhenReady = true
-            }
+    val player = remember {
+        ExoPlayer.Builder(context).build().apply {
+            repeatMode = Player.REPEAT_MODE_ALL
+            volume = 0f
         }
+    }
 
-        DisposableEffect(player) {
-            onDispose { player.release() }
-        }
+    LaunchedEffect(videoUri) {
+        player.setMediaItem(MediaItem.fromUri(videoUri))
+        player.prepare()
+        player.playWhenReady = true
+    }
 
+    DisposableEffect(player) {
+        onDispose { player.release() }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(16.dp))
+            .background(palette.cardSurface)
+            .clickable { variantIndex++ }
+    ) {
         AndroidView(
             factory = { ctx ->
                 androidx.media3.ui.PlayerView(ctx).apply {
@@ -2467,20 +2509,22 @@ fun FrogAnimation(type: WeatherType) {
                     resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 }
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(16.dp))
+            modifier = Modifier.fillMaxSize()
         )
-    } else {
+
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .background(palette.cardSurface, shape = RoundedCornerShape(16.dp)),
-            contentAlignment = Alignment.Center
+                .align(Alignment.BottomEnd)
+                .padding(8.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = 0.48f))
+                .padding(horizontal = 8.dp, vertical = 3.dp)
         ) {
-            Text(text = type.emoji, fontSize = 64.sp)
+            Text(
+                text = "${selectedVideo.scene.label} • ${selectedVideo.dayPhase.label} (${(variantIndex % candidates.size) + 1}/${candidates.size})",
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 10.sp
+            )
         }
     }
 }
